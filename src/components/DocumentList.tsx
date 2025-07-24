@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { blink } from '../blink/client'
 import { Button } from './ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card'
@@ -15,6 +15,7 @@ import {
   Download
 } from 'lucide-react'
 import { useToast } from '../hooks/use-toast'
+import mammoth from 'mammoth'
 
 interface Document {
   id: string
@@ -34,36 +35,49 @@ export function DocumentList({ onDocumentSelect, user }: DocumentListProps) {
   const [documents, setDocuments] = useState<Document[]>([])
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
+  const [importing, setImporting] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
 
   const loadDocuments = useCallback(async () => {
     try {
       setLoading(true)
+      console.log('Loading documents for user:', user?.id)
+      
+      if (!user?.id) {
+        console.error('No user ID available')
+        return
+      }
+      
       const docs = await blink.db.documents.list({
-        where: {
-          OR: [
-            { owner_user_id: user.id },
-            // Add collaborator access later
-          ]
-        },
+        where: { owner_user_id: user.id },
         orderBy: { updated_at: 'desc' }
       })
+      
+      console.log('Loaded documents:', docs)
       setDocuments(docs)
     } catch (error) {
       console.error('Failed to load documents:', error)
+      console.error('Error details:', {
+        message: error?.message,
+        stack: error?.stack,
+        userId: user?.id
+      })
       toast({
         title: "Error",
-        description: "Failed to load documents",
+        description: `Failed to load documents: ${error?.message || 'Unknown error'}`,
         variant: "destructive"
       })
     } finally {
       setLoading(false)
     }
-  }, [user.id, toast])
+  }, [user?.id, toast])
 
   useEffect(() => {
-    loadDocuments()
-  }, [loadDocuments])
+    if (user?.id) {
+      loadDocuments()
+    }
+  }, [loadDocuments, user?.id])
 
   const createNewDocument = async () => {
     try {
@@ -88,6 +102,75 @@ export function DocumentList({ onDocumentSelect, user }: DocumentListProps) {
         description: "Failed to create document",
         variant: "destructive"
       })
+    }
+  }
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click()
+  }
+
+  const handleFileImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (!file.name.toLowerCase().endsWith('.docx')) {
+      toast({
+        title: "Error",
+        description: "Please select a valid DOCX file",
+        variant: "destructive"
+      })
+      return
+    }
+
+    setImporting(true)
+
+    try {
+      // Convert DOCX to HTML using mammoth
+      const arrayBuffer = await file.arrayBuffer()
+      const result = await mammoth.convertToHtml({ arrayBuffer })
+      
+      // Extract title from filename (remove .docx extension)
+      const title = file.name.replace(/\.docx?$/i, '') || 'Imported Document'
+      
+      // Create new document with imported content
+      const newDoc = await blink.db.documents.create({
+        id: `doc_${Date.now()}`,
+        title,
+        content: result.value, // HTML content from mammoth
+        owner_user_id: user.id,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+
+      // Refresh document list
+      await loadDocuments()
+      
+      // Navigate to the imported document
+      onDocumentSelect(newDoc.id)
+      
+      toast({
+        title: "Success",
+        description: `"${title}" has been imported successfully`
+      })
+
+      // Show any conversion warnings
+      if (result.messages && result.messages.length > 0) {
+        console.warn('DOCX conversion warnings:', result.messages)
+      }
+
+    } catch (error) {
+      console.error('Failed to import DOCX:', error)
+      toast({
+        title: "Error",
+        description: "Failed to import DOCX file. Please try again.",
+        variant: "destructive"
+      })
+    } finally {
+      setImporting(false)
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
     }
   }
 
@@ -156,14 +239,26 @@ export function DocumentList({ onDocumentSelect, user }: DocumentListProps) {
           </div>
           
           <div className="flex items-center space-x-3">
-            <Button variant="outline" size="sm">
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={handleImportClick}
+              disabled={importing}
+            >
               <FileUp className="h-4 w-4 mr-2" />
-              Import DOCX
+              {importing ? 'Importing...' : 'Import DOCX'}
             </Button>
             <Button onClick={createNewDocument} size="sm">
               <Plus className="h-4 w-4 mr-2" />
               New Document
             </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".docx"
+              onChange={handleFileImport}
+              className="hidden"
+            />
           </div>
         </div>
 
